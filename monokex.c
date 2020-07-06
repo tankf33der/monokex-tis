@@ -243,7 +243,7 @@ int crypto_kex_read_p(crypto_kex_ctx *ctx,
         m_size < min_size + p_size                                ||
         (p == 0 && p_size != 0)) {
         WIPE_CTX(ctx);
-        return -1;
+        return -11;
     }
     // Next time, we'll send
     ctx->flags |= SHOULD_SEND;
