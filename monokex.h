@@ -6,7 +6,7 @@
 
 typedef struct {
     uint8_t  pool[64];    // random pool
-    uint8_t  hash[64];    // chaining hash
+    uint8_t  hash[64];    // chaining hash + extra hash
     uint8_t  s [32];      // static    secret key
     uint8_t  sp[32];      // static    public key
     uint8_t  e [32];      // ephemeral secret key
@@ -59,11 +59,7 @@ void crypto_kex_add_prelude(crypto_kex_ctx *ctx,
 void crypto_kex_remote_key(crypto_kex_ctx *ctx, uint8_t key[32]);
 
 // Gets the session key and wipes the context.
-// The extra key can be used as a second session key, or as a hash for
-// channel binding.
-void crypto_kex_final(crypto_kex_ctx *ctx,
-                      uint8_t session_key[32],
-                      uint8_t extra_key  [32]);
+void crypto_kex_final(crypto_kex_ctx *ctx, uint8_t session_key[32]);
 
 // Next action to perform. Can be used instead of hard coding everything.
 //
@@ -76,7 +72,8 @@ void crypto_kex_final(crypto_kex_ctx *ctx,
 // If next_message_size is not NULL, the minimum size of the next
 // message (without payload) will be written in it.
 crypto_kex_action crypto_kex_next_action(const crypto_kex_ctx *ctx,
-                                         size_t *next_message_size);/////////
+                                         size_t *next_message_size);
+/////////
 /// N ///
 /////////
 
@@ -1147,4 +1144,5 @@ void crypto_kex_i1x1_server_init(crypto_kex_ctx *ctx,
                                  uint8_t         random_seed[32],
                                  const uint8_t   server_sk  [32],
                                  const uint8_t   server_pk  [32]);
+
 #endif // MONOKEX_H

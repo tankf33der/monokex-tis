@@ -32,8 +32,8 @@ void xk1_manual(void) {
     crypto_kex_read(&s, d, 64);
     crypto_kex_remote_key(&s, k);
 
-    crypto_kex_final(&c, ckey, cextra);
-    crypto_kex_final(&s, skey, sextra);
+    crypto_kex_final(&c, ckey);
+    crypto_kex_final(&s, skey);
 }
 
 int main(void) {

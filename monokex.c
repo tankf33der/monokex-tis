@@ -38,14 +38,19 @@ static const u8 zero[8] = {0};
 ////////////////////
 #include "monocypher.h"
 
-static void keyed_hash(u8 hash[64], const u8 key[64], const u8 *in, size_t size)
+static void kdf(u8 next[64], const u8 prev[32], const u8 *in, size_t size)
 {
-    crypto_blake2b_general(hash, 64, key, 64, in, size);
+    crypto_blake2b_general(next, 48, prev, 32, in, size);
 }
 
 static void ephemeral_key_pair(u8 pk[32], u8 sk[32], u8 seed[32])
 {
+#ifndef DISABLE_ELLIGATOR
     crypto_hidden_key_pair(pk, sk, seed);
+#else
+    copy(sk, seed, 32);
+    crypto_x25519_public_key(pk, sk);
+#endif
 }
 
 static void static_public_key(u8 pk[32], const u8 sk[32])
@@ -53,9 +58,12 @@ static void static_public_key(u8 pk[32], const u8 sk[32])
     crypto_x25519_public_key(pk, sk);
 }
 
+// If the key is hidden, unhide them
 static void decode_ephemeral_key(u8 key[32])
 {
+#ifndef DISABLE_ELLIGATOR
     crypto_hidden_to_curve(key, key);
+#endif
 }
 
 // in == NULL is the same as in == {0, 0, 0, ...}
@@ -88,14 +96,7 @@ static void wipe(void *buffer, size_t size)
 
 void kex_mix_hash(crypto_kex_ctx *ctx, const u8 *input, size_t input_size)
 {
-    keyed_hash(ctx->hash, ctx->hash, input, input_size);
-}
-
-static void kex_extra_hash(crypto_kex_ctx *ctx, u8 out[64])
-{
-    u8 one [1] = {1};
-    keyed_hash(ctx->hash, ctx->hash, zero, 1);
-    keyed_hash(out      , ctx->hash,  one, 1);
+    kdf(ctx->hash, ctx->hash, input, input_size);
 }
 
 static void kex_update_key(crypto_kex_ctx *ctx,
@@ -107,29 +108,6 @@ static void kex_update_key(crypto_kex_ctx *ctx,
     kex_mix_hash(ctx, tmp, 32);
     ctx->flags |= HAS_KEY;
     WIPE_BUFFER(tmp);
-}
-
-static void kex_auth(crypto_kex_ctx *ctx, u8 tag[16])
-{
-    if (!(ctx->flags & HAS_KEY)) { return; }
-    u8 tmp[64];
-    kex_extra_hash(ctx, tmp);
-    copy(tag, tmp, 16);
-    WIPE_BUFFER(tmp);
-}
-
-static int kex_verify(crypto_kex_ctx *ctx, const u8 tag[16])
-{
-    if (!(ctx->flags & HAS_KEY)) { return 0; }
-    u8 real_tag[64]; // actually 16 useful bytes
-    kex_extra_hash(ctx, real_tag);
-    if (verify16(tag, real_tag)) {
-        WIPE_CTX(ctx);
-        WIPE_BUFFER(real_tag);
-        return -1;
-    }
-    WIPE_BUFFER(real_tag);
-    return 0;
 }
 
 static void kex_write_raw(crypto_kex_ctx *ctx, u8 *msg,
@@ -153,12 +131,10 @@ static void kex_write(crypto_kex_ctx *ctx, u8 *msg, const u8 *src, size_t size)
         return;
     }
     // we have a key, we encrypt
-    u8 key[64]; // actually 32 useful bytes
-    kex_extra_hash(ctx, key);
-    encrypt(msg, src, size, key);
+    encrypt(ctx->hash, 0, 64, ctx->hash);
+    encrypt(msg, src, size, ctx->hash + 32);
     kex_mix_hash(ctx, msg, size);
-    kex_auth(ctx, msg + size);
-    WIPE_BUFFER(key);
+    copy(msg + size, ctx->hash + 32, 16);
 }
 
 static int kex_read(crypto_kex_ctx *ctx, u8 *dest, const u8 *msg, size_t size)
@@ -168,10 +144,12 @@ static int kex_read(crypto_kex_ctx *ctx, u8 *dest, const u8 *msg, size_t size)
         return 0;
     }
     // we have a key, we decrypt
-    u8 key[64]; // actually 32 useful bytes
-    kex_extra_hash(ctx, key);
+    encrypt(ctx->hash, 0, 64, ctx->hash);
+    u8 key[32];
+    copy(key, ctx->hash + 32, 32);
     kex_mix_hash(ctx, msg, size);
-    if (kex_verify(ctx, msg + size)) {
+    if (verify16(msg + size, ctx->hash + 32)) {
+        WIPE_CTX(ctx);
         WIPE_BUFFER(key);
         return -1;
     }
@@ -240,10 +218,9 @@ int crypto_kex_read_p(crypto_kex_ctx *ctx,
     // Do nothing & fail if we should not receive
     size_t min_size;
     if (crypto_kex_next_action(ctx, &min_size) != CRYPTO_KEX_READ ||
-        m_size < min_size + p_size                                ||
-        (p == 0 && p_size != 0)) {
+        m_size < min_size + p_size) {
         WIPE_CTX(ctx);
-        return -11;
+        return -1;
     }
     // Next time, we'll send
     ctx->flags |= SHOULD_SEND;
@@ -269,9 +246,10 @@ int crypto_kex_read_p(crypto_kex_ctx *ctx,
     }
     kex_next_message(ctx);
 
-    // Read payload, if any
-    if (p != 0) { if (kex_read(ctx, p, m, p_size)) { return -1; } }
-    else        { if (kex_verify(ctx, m)         ) { return -1; } }
+    // Read payload
+    if (kex_read(ctx, p, m, p_size)) {
+        return -1;
+    }
     return 0;
 }
 
@@ -282,8 +260,7 @@ void crypto_kex_write_p(crypto_kex_ctx *ctx,
     // Fail if we should not send (the failure is alas delayed)
     size_t min_size;
     if (crypto_kex_next_action(ctx, &min_size) != CRYPTO_KEX_WRITE ||
-        m_size < min_size + p_size                                 ||
-        (p == 0 && p_size != 0)) {
+        m_size < min_size + p_size) {
         WIPE_CTX(ctx);
         return;
     }
@@ -305,10 +282,10 @@ void crypto_kex_write_p(crypto_kex_ctx *ctx,
     }
     kex_next_message(ctx);
 
-    // Write payload, if any
+    // Write payload
     size_t tag_size = ctx->flags & HAS_KEY ? 16 : 0;
-    if (p != 0) { kex_write(ctx, m, p, p_size); m += tag_size + p_size; }
-    else        { kex_auth (ctx, m);            m += tag_size;          }
+    kex_write(ctx, m, p, p_size);
+    m += tag_size + p_size;
 
     // Pad
     size_t pad_size = m_size - min_size - p_size;
@@ -334,13 +311,10 @@ void crypto_kex_remote_key(crypto_kex_ctx *ctx, u8 key[32])
     ctx->flags &= ~GETS_REMOTE;
 }
 
-void crypto_kex_final(crypto_kex_ctx *ctx, u8 key[32], u8 extra[32])
+void crypto_kex_final(crypto_kex_ctx *ctx, u8 key[32])
 {
     if (crypto_kex_next_action(ctx, 0) == CRYPTO_KEX_FINAL) {
         copy(key, ctx->hash, 32);
-        if (extra != 0) {
-            copy(extra, ctx->hash + 32, 32);
-        }
     }
     WIPE_CTX(ctx);
 }
